@@ -1,0 +1,1190 @@
+﻿// AgentPlus.cpp : Defines the entry point for the console application.
+/* Copyright (C) 2015 Xuesong Zhou - All Rights Reserved*/
+
+#include "stdafx.h"
+#include <iostream>
+#include <fstream>
+#include <omp.h>
+#include <algorithm>
+#include <time.h>
+#include "AgentPlus.h"
+#include "CSVParser.h"
+#include <functional>
+#include<windows.h>
+#include<stdio.h>   
+#include<tchar.h>
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#endif
+
+// The one and only application object
+
+CWinApp theApp;
+using namespace std;
+
+TCHAR g_SettingFileName[_MAX_PATH] = _T("./Settings.txt");
+
+FILE* g_pFileDebugLog = NULL;
+
+FILE* g_pFileOutputLog = NULL;
+
+FILE* g_pFileAgentPathLog = NULL;
+
+FILE* g_pFileGooglePath = NULL;
+
+int g_number_of_threads = 1;
+int g_shortest_path_debugging_flag = 0;
+int g_agent_number;
+
+int g_google_output_count;
+
+double g_grid3D_len = 0.01;
+int g_grid3D_time_len = 15;
+double g_walking_speed = 0.05;//unit: mile/minute
+
+
+std::string g_convert_keys_to_string(int key1, int key2)
+{
+char buff[100];
+sprintf(buff, "%d:%d", key1, key2);
+
+std::string buffAsStdStr = buff;
+return buffAsStdStr;
+}
+std::string g_convert_3Dkeys_to_string(int key1, int key2,int key3)
+{
+	char buff[100];
+	sprintf(buff,  "%d:%d:%d", key1, key2,key3);
+//	sprintf(buff, "%d:%d", key1, key2);
+
+	std::string buffAsStdStr = buff;
+	return buffAsStdStr;
+}
+
+std::string g_convert_2Dkeys_to_string(int key1, int key2)
+{
+	char buff[100];
+	sprintf(buff, "%d:%d", key1, key2);
+
+	std::string buffAsStdStr = buff;
+	return buffAsStdStr;
+}
+std::map<string, int> g_internal_node_no_map;
+std::map<int, string> g_external_node_id_map;
+
+std::map<string, int> g_internal_agent_no_map;
+//variables used to create grid3Ds
+double g_area_min_x = 999999999;
+double g_area_min_y = 999999999;
+double g_area_max_x = -999999999;
+double g_area_max_y = -999999999;
+
+class CArc
+{
+public: 
+	int to_vertex_no;
+	int to_time;
+	int to_trip_id;
+	float cost;
+	int type;
+
+};
+
+
+class CVertex
+{ 
+public:
+	CVertex()
+	{
+		accessible_vertex_count = 0;
+		type = 0;
+	}
+
+	//std::map<int, int> m_vertex_predecessor;
+	//std::map<int, int> m_vertex_label_cost;
+	
+	int vertex_no;
+	int stop_id;
+	int time_in_min;
+	int	trip_id;
+	int type;
+	double x;
+	double y;
+
+	int accessible_vertex_count;
+
+	std::vector<CArc> m_outgoing_vertex_vector;
+	
+};
+
+class CAgentDemand
+{
+public:
+	double from_x;
+	double from_y;
+	int departure_time_in_min;
+	double to_x;
+	double to_y;
+};
+
+std::vector<CVertex> g_vertex_vector;
+vector<CAgentDemand> g_agent_demands;
+
+int g_number_of_links = 0;
+int g_number_of_nodes = 0;
+
+
+vector<int> ParseLineToIntegers(string line)
+{
+	vector<int> SeperatedIntegers;
+	string subStr;
+	istringstream ss(line);
+
+	char Delimiter = ';';
+
+	while (std::getline(ss, subStr, Delimiter))
+	{
+		int integer = atoi(subStr.c_str());
+		SeperatedIntegers.push_back(integer);
+	}
+	return SeperatedIntegers;
+}
+void g_ProgramStop()
+{
+
+	cout << "Agent+ Transit Program stops. Press any key to terminate. Thanks!" << endl;
+	getchar();
+	exit(0);
+};
+void g_ReadInputData()
+{
+
+
+	g_number_of_nodes = 0;
+	g_number_of_links = 0;  // initialize  the counter to 0
+
+	int interval_node_no = 0;
+	double x, y;
+	// step 1: read node file 
+	CCSVParser parser;
+	if (parser.OpenCSVFile("input_vertex.csv", true))
+	{
+		std::map<int, int> node_id_map;
+
+		while (parser.ReadRecord())  // if this line contains [] mark, then we will also read field headers.
+		{
+
+			string name;
+			int node_type;
+			int node_id;
+			int trip_id;
+			int time;
+
+			if (parser.GetValueByFieldName("stop_id", node_id) == false)
+				continue;
+
+			parser.GetValueByFieldName("time", time);
+
+			string key_index = g_convert_keys_to_string(node_id, time);
+
+			if (g_internal_node_no_map.find(key_index) != g_internal_node_no_map.end())
+			{
+				continue; //has been defined
+			}
+			g_internal_node_no_map[key_index] = interval_node_no;
+
+			g_external_node_id_map[interval_node_no] = key_index;
+			interval_node_no++;
+
+			parser.GetValueByFieldName("trip_id", trip_id);
+			parser.GetValueByFieldName("type", node_type);
+
+			parser.GetValueByFieldName("X", x,false);
+			parser.GetValueByFieldName("Y", y, false);
+
+			if (x > g_area_max_x)
+				g_area_max_x = x;
+			if (x < g_area_min_x)
+				g_area_min_x = x;
+			if (y > g_area_max_y)
+				g_area_max_y = y;
+			if (y < g_area_min_y)
+				g_area_min_y = y;
+
+			CVertex vertex;
+
+			vertex.stop_id = node_id;
+			vertex.trip_id = trip_id;
+			vertex.x = x;
+			vertex.y = y;
+
+			if (interval_node_no % 100 == 0)
+			{
+				vertex.type = 1;
+			}
+			vertex.time_in_min = time;
+
+			g_vertex_vector.push_back(vertex);
+			//if (g_vertex_vector.size()>1000000)
+			//	break;
+
+			g_number_of_nodes++;
+			if (g_number_of_nodes % 10000 == 0)
+				cout << "reading " << g_number_of_nodes << " nodes.. " << endl;
+		}
+
+		cout << "number of nodes = " << g_number_of_nodes << endl;
+
+		fprintf(g_pFileOutputLog, "number of nodes =,%d\n", g_number_of_nodes);
+		parser.CloseCSVFile();
+	}
+
+	// step 2: read link file 
+
+	CCSVParser parser_arc;
+
+	if (parser_arc.OpenCSVFile("input_arc.csv", true))
+	{
+		while (parser_arc.ReadRecord())  // if this line contains [] mark, then we will also read field headers.
+		{
+			int from_node_id = 0;
+			int to_node_id = 0;
+			if (parser_arc.GetValueByFieldName("from_stop_id", from_node_id) == false)
+				continue;
+			if (parser_arc.GetValueByFieldName("to_stop_id", to_node_id) == false)
+				continue;
+
+			int from_time = 0;
+			int to_time = 0;
+			if (parser_arc.GetValueByFieldName("from_time", from_time) == false)
+				continue;
+			if (parser_arc.GetValueByFieldName("to_time", to_time) == false)
+				continue;
+
+
+			// add the to node id into the outbound (adjacent) node list
+
+			string key_index_from = g_convert_keys_to_string(from_node_id, from_time);
+			string key_index_to = g_convert_keys_to_string(to_node_id, to_time);
+
+			int internal_from_node_no = g_internal_node_no_map[key_index_from];
+			int internal_to_node_no = g_internal_node_no_map[key_index_to];
+			CArc arc;
+
+			arc.to_vertex_no = internal_to_node_no;
+	
+			parser_arc.GetValueByFieldName("cost", arc.cost);
+			parser_arc.GetValueByFieldName("type", arc.type);
+			parser_arc.GetValueByFieldName("trip_id", arc.to_trip_id);
+
+			g_vertex_vector[internal_from_node_no].m_outgoing_vertex_vector.push_back(arc);
+
+			g_number_of_links++;
+
+			//if (g_number_of_links>10000)
+			//	break;
+
+				if (g_number_of_links % 100000 == 0)
+					cout << "reading " << g_number_of_links << " links.. " << endl;
+			}
+		}
+
+		cout << "number of links = " << g_number_of_links << endl;
+
+		fprintf(g_pFileOutputLog, "number of links =,%d\n", g_number_of_links);
+
+		parser_arc.CloseCSVFile();
+
+		g_agent_number = 0;
+		CCSVParser parser_dmd;
+		if (parser_dmd.OpenCSVFile("input_demand_new_whole_area.csv", true))
+		{
+			while (parser_dmd.ReadRecord())  // if this line contains [] mark, then we will also read field headers.
+			{
+				CAgentDemand agent;
+				int idx = 0;
+				if (parser_dmd.GetValueByFieldName("index", idx) == false)
+					continue;
+				parser_dmd.GetValueByFieldName("from_node_x", x, false);
+				agent.from_x = x;
+				parser_dmd.GetValueByFieldName("from_node_y", y, false);
+				agent.from_y = y;
+
+				if (x > g_area_max_x)
+					g_area_max_x = x;
+				if (x < g_area_min_x)
+					g_area_min_x = x;
+				if (y > g_area_max_y)
+					g_area_max_y = y;
+				if (y < g_area_min_y)
+					g_area_min_y = y;
+
+				parser_dmd.GetValueByFieldName("to_node_x", x, false);
+				agent.to_x = x;
+				parser_dmd.GetValueByFieldName("to_node_y", y, false);
+				agent.to_y = y;
+				if (x > g_area_max_x)
+					g_area_max_x = x;
+				if (x < g_area_min_x)
+					g_area_min_x = x;
+				if (y > g_area_max_y)
+					g_area_max_y = y;
+				if (y < g_area_min_y)
+					g_area_min_y = y;
+
+				parser_dmd.GetValueByFieldName("departure_time_in_min", agent.departure_time_in_min);
+				g_agent_demands.push_back(agent);
+				g_agent_number++;
+
+				//if (g_agent_number >= 10000)
+				//	break;
+
+				if (g_agent_number % 1000 == 0)
+					cout << "reading " << g_agent_number << " agents... " << endl;
+
+			}
+		}
+		parser_dmd.CloseCSVFile();
+}
+
+#pragma region Written by Miao
+
+class grid3D
+{
+public:
+	std::vector<int> vertexes_in_grid3D;
+
+public:
+
+	void add_vertex(int vertex_no)
+	{
+		vertexes_in_grid3D.push_back(vertex_no);
+	}
+};
+
+class grid2D
+{
+public:
+	std::vector<int> stops_in_grid2D;
+	std::vector<double> stop_x;
+	std::vector<double> stop_y;
+	std::map<int, int> stopid_map;
+
+public:
+
+	void add_stopid(int stopid, double x, double y)
+	{
+		if(stopid_map.find(stopid)== stopid_map.end())  // not defined
+		{ 
+		stops_in_grid2D.push_back(stopid);
+		stop_x.push_back(x);
+		stop_y.push_back(y);
+		stopid_map[stopid] = 1; //defined;
+		}
+	}
+};
+
+std::map<string, grid3D*> g_grid3D_map;
+std::map<string, grid2D*> g_grid2D_map;
+
+int g_grid3D_rows = 0;
+int g_grid3D_cols = 0;
+
+int g_make_grid3D()
+{
+	//step 1. making grid3Ds
+	int rows = ceil((g_area_max_y - g_area_min_y) / g_grid3D_len);
+	int cols = ceil((g_area_max_x - g_area_min_x) / g_grid3D_len);
+	g_grid3D_rows = rows;
+	g_grid3D_cols = cols;
+	char buff[30];
+	grid3D* pgrid3D;
+	for (int i = 0; i < g_number_of_nodes; i++)
+	{
+		CVertex vertex = g_vertex_vector[i];
+		int row = floor((vertex.y - g_area_min_y) / g_grid3D_len);
+		int col = floor((vertex.x - g_area_min_x) / g_grid3D_len);
+		int t = floor(vertex.time_in_min / g_grid3D_time_len);
+		string key = g_convert_3Dkeys_to_string(row, col, t);
+		if (g_grid3D_map.find(key) == g_grid3D_map.end())  // has not been defined. 
+		{
+			pgrid3D = new grid3D();
+			pgrid3D->add_vertex(i);
+			g_grid3D_map[key] = pgrid3D;
+		}
+		else
+		{
+			g_grid3D_map[key]->add_vertex(i);
+		}
+
+	}
+	return 1;
+}
+
+void g_free_grid3Ds_memory()
+{
+	for (std::map<string, grid3D*>::iterator it = g_grid3D_map.begin(); it != g_grid3D_map.end(); ++it)
+	{
+		delete it->second;
+		it->second = NULL;
+	}
+	g_grid3D_map.clear();
+}
+
+int g_make_grid2D()
+{
+	//step 1. making grid2Ds
+	char buff[30];
+	grid2D* pgrid2D;
+	for (int i = 0; i < g_number_of_nodes; i++)
+	{
+		CVertex vertex = g_vertex_vector[i];
+		int row = floor((vertex.y - g_area_min_y) / g_grid3D_len);
+		int col = floor((vertex.x - g_area_min_x) / g_grid3D_len);
+		string key = g_convert_2Dkeys_to_string(row, col);
+		if (g_grid2D_map.find(key) == g_grid2D_map.end())  // has not been defined. 
+		{
+			pgrid2D = new grid2D();
+			pgrid2D->add_stopid(g_vertex_vector[i].stop_id, g_vertex_vector[i].x, g_vertex_vector[i].y);
+			g_grid2D_map[key] = pgrid2D;
+		}else
+		{ 
+			g_grid2D_map[key] ->add_stopid(g_vertex_vector[i].stop_id, g_vertex_vector[i].x, g_vertex_vector[i].y);
+
+
+		}
+	}
+	return 1;
+}
+
+void g_free_grid2Ds_memory()
+{
+	for (std::map<string, grid2D*>::iterator it = g_grid2D_map.begin(); it != g_grid2D_map.end(); ++it)
+	{
+		delete it->second;
+		it->second = NULL;
+	}
+	g_grid2D_map.clear();
+}
+
+class grid3DTool
+{
+private:
+public:
+	vector<int> near_vertex;
+public:
+	int FindNearVertexes(double x, double y, int t)
+	{
+		near_vertex.clear();
+		double max_dis = 0.3;
+		double max_waiting_time = 30;
+		int max_trav_time = 1440;
+
+		if (x < g_area_min_x)
+			x = g_area_min_x;
+		if (x > g_area_max_x)
+			x = g_area_max_x;
+		if (y < g_area_min_y)
+			y = g_area_min_y;
+		if (y > g_area_max_y)
+			y = g_area_max_y;
+
+		int row = floor((y - g_area_min_y) / g_grid3D_len);
+		int col = floor((x - g_area_min_x) / g_grid3D_len);
+		if (row < 0 || row >= g_grid3D_rows || col < 0 || col >= g_grid3D_cols)
+		{
+			fprintf(g_pFileDebugLog, "%s,%f,%f,%s\n", "Point at", x, y, "out of grid3D range");
+			g_ProgramStop();
+		}
+
+		int rr, rc, rt;
+		double dis;
+		int vertex_no;
+		rt = floor(t / g_grid3D_time_len);
+		for (int i = -1; i <= 1; i++)
+		{
+			rr = row + i;
+			if (rr < 0 || rr >= g_grid3D_rows)
+				continue;
+			for (int j = -1; j <= 1; j++)
+			{
+				rc = col + j;
+				if (rc < 0 || rc >= g_grid3D_cols)
+					continue;
+				for (int k = 0; k < max_trav_time / g_grid3D_time_len; k++)
+				{
+					rt += k;
+					string key = g_convert_3Dkeys_to_string(rr, rc, rt);
+					if (g_grid3D_map.find(key) == g_grid3D_map.end())
+						continue;
+					grid3D* pG = g_grid3D_map[key];
+					for (int m = 0; m < pG->vertexes_in_grid3D.size(); m++)
+					{
+						vertex_no = pG->vertexes_in_grid3D[m];
+						dis = GetDistance(x, y, g_vertex_vector[vertex_no].x, g_vertex_vector[vertex_no].y);
+						if (dis > 0.1)
+							continue;
+						near_vertex.push_back(vertex_no);
+					}
+
+				}
+			}
+		}
+		return (int)near_vertex.size();
+
+	}
+	int FindNearestVertex(double x, double y, int t,bool bLog = false)
+	{
+		double max_dis = 0.3;
+		double max_waiting_time = 30;
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a nearest vertext of %9.6f,%9.6f,%d\n", x, y, t);
+		if (x < g_area_min_x)
+			x = g_area_min_x;
+		if (x > g_area_max_x)
+			x = g_area_max_x;
+		if (y < g_area_min_y)
+			y = g_area_min_y;
+		if (y > g_area_max_y)
+			y = g_area_max_y;
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a nearest vertext of %9.6f,%9.6f,%d\n", x, y, t);
+
+		int row = floor((y - g_area_min_y) / g_grid3D_len);
+		int col = floor((x - g_area_min_x) / g_grid3D_len);
+		if (row < 0 || row >= g_grid3D_rows || col < 0 || col >= g_grid3D_cols)
+		{
+			fprintf(g_pFileDebugLog, "%s,%f,%f,%s\n", "Point at", x, y, "out of grid3D range");
+			g_ProgramStop();
+		}
+
+		int rr, rc;
+		double dis, rt;
+		int vertex_no;
+		double mindis = 99999999999;
+		int mindis_ver = -1;
+		int timestep = max_waiting_time / g_grid3D_time_len + 1;
+
+		rt = floor(t / g_grid3D_time_len);
+		for (int i = -1; i <= 1; i++)
+		{
+			rr = row + i;
+			if (rr < 0 || rr >= g_grid3D_rows)
+				continue;
+			for (int j = -1; j <= 1; j++)
+			{
+				rc = col + j;
+				if (rc < 0 || rc >= g_grid3D_cols)
+					continue;
+				for (int k = 0; k < timestep; k++)
+				{
+					rt += k;
+					if (bLog)
+						fprintf(g_pFileDebugLog, "Checking grid3d at row=%d col=%d t=%d\n", row, col, rt);
+					string key = g_convert_3Dkeys_to_string(rr, rc, rt);
+					if (g_grid3D_map.find(key) == g_grid3D_map.end())
+					{
+						if (bLog)
+						{
+							fprintf(g_pFileDebugLog, "Grid3D %s does not exist\n", key);
+						}
+						continue;
+					}
+					grid3D* pG = g_grid3D_map[key];
+					for (int m = 0; m < pG->vertexes_in_grid3D.size(); m++)
+					{
+						vertex_no = pG->vertexes_in_grid3D[m];
+						dis = GetDistance(x, y, g_vertex_vector[vertex_no].x, g_vertex_vector[vertex_no].y);
+						if (bLog)
+							fprintf(g_pFileDebugLog, "index=%d,vNO=%d, point=(%9.6f, %9.6f) dis=%5.2f\n", m, vertex_no,
+								g_vertex_vector[vertex_no].x, g_vertex_vector[vertex_no].y, dis);
+						if (dis > 0.5)
+							continue;
+						if (dis < mindis)
+						{
+							mindis = dis;
+							mindis_ver = vertex_no;
+						}
+					}
+
+				}
+			}
+		}
+		return mindis_ver;
+
+	}
+
+
+	int FindNearestStopid(double x, double y,bool bLog = false)
+	{
+		double max_dis = 0.3;
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a nearsest stop of %9.6f, %9.6f\n", x, y);
+		if (x < g_area_min_x)
+			x = g_area_min_x;
+		if (x > g_area_max_x)
+			x = g_area_max_x;
+		if (y < g_area_min_y)
+			y = g_area_min_y;
+		if (y > g_area_max_y)
+			y = g_area_max_y;
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a nearsest stop of %9.6f, %9.6f\n", x, y);
+
+		int row = floor((y - g_area_min_y) / g_grid3D_len);
+		int col = floor((x - g_area_min_x) / g_grid3D_len);
+		if (row < 0 || row >= g_grid3D_rows || col < 0 || col >= g_grid3D_cols)
+		{
+			fprintf(g_pFileDebugLog, "%s,%f,%f,%s\n", "Point at", x, y, "out of grid2D range");
+			g_ProgramStop();
+		}
+
+		int rr, rc;
+		double dis;
+		int stopid;
+		double mindis = 99999999999;
+		int mindis_stopid = -1;
+
+
+		for (int i = -1; i <= 1; i++)
+		{
+			rr = row + i;
+			if (rr < 0 || rr >= g_grid3D_rows)
+				continue;
+			for (int j = -1; j <= 1; j++)
+			{
+				rc = col + j;
+				if (rc < 0 || rc >= g_grid3D_cols)
+					continue;
+
+				string key = g_convert_2Dkeys_to_string(rr, rc);
+				if (bLog)
+					fprintf(g_pFileDebugLog, "Checking grid at row=%d col=%d key=%s\n", rr, rc,key);
+				if (g_grid2D_map.find(key) == g_grid2D_map.end())
+						continue;
+					grid2D* pG = g_grid2D_map[key];
+					for (int m = 0; m < pG->stops_in_grid2D .size(); m++)
+					{
+						stopid = pG->stops_in_grid2D[m];
+						dis = GetDistance(x, y, pG->stop_x[m], pG->stop_y[m]);
+						if (bLog)
+							fprintf(g_pFileDebugLog, "Checking stops in Grid2d idx=%d, id=%d point=( %9.6f,%9.6f ) dis=%5.2f\n", m,
+								stopid, pG->stop_x, pG->stop_y, dis);
+						if (dis > 0.5)
+							continue;
+						if (dis < mindis)
+						{
+							mindis = dis;
+							mindis_stopid = stopid;
+						}
+					}
+
+			}
+		}
+		return mindis_stopid;
+
+	}
+	static double GetDistance(double x1, double y1, double x2, double y2)
+	{
+		double Equatorial_Radius = 3963.19059; // unit: mile
+		double toradians = 3.1415926 / 180.0;
+		//double todeg = 180.0 / Math.PI;
+
+		double p2lat = x2 * toradians;
+		double p2lng = y2 * toradians;
+
+		double p1lat = x1 * toradians;
+		double p1lng = y1 * toradians;
+
+		double distance = acos(sin(p1lat) * sin(p2lat) + cos(p1lat) * cos(p2lat) * cos(p2lng - p1lng)) * Equatorial_Radius;
+		// unit: mile
+		return distance;
+
+	}
+
+protected:
+
+};
+
+
+#pragma endregion
+
+class NetworkForSP  // mainly for shortest path calculation, not just physical network
+{
+public:
+	int m_ListFront;
+	int m_ListTail;
+
+	int* m_SENodeList;
+	float* m_node_label_cost;
+	int* m_node_predecessor;
+	int* m_node_status_array;
+	FILE* pFileAgentPathLog;
+	grid3DTool m_Tool;
+	int m_threadNo;
+	void AllocateMemory(int number_of_nodes)
+	{
+		m_SENodeList = new int[number_of_nodes];
+		m_node_predecessor = new int[number_of_nodes];
+		m_node_status_array = new int[number_of_nodes];
+		m_node_label_cost = new float[number_of_nodes];
+		char buffer[256];
+		sprintf_s(buffer, "%s_%d.csv", "agent_path", m_threadNo);
+
+		pFileAgentPathLog = fopen(buffer, "w");
+
+
+		if (pFileAgentPathLog == NULL)
+		{
+			cout << "Cannot open File" << buffer << endl;
+			//g_ProgramStop();
+		}
+		else
+		{
+
+		fprintf(pFileAgentPathLog, "agent_id,destination_stop_id,travel_time_in_min,arrival_time,stop_sequence,xy_sequence\n");
+
+		}
+
+	}
+	
+	~NetworkForSP()
+	{
+		if (m_SENodeList != NULL)
+		delete m_SENodeList;
+
+	if (m_node_label_cost != NULL)
+		delete m_node_label_cost;
+
+	if (m_node_predecessor != NULL)
+		delete m_node_predecessor;
+
+	if (m_node_status_array != NULL)
+		delete m_node_status_array;
+	if(pFileAgentPathLog != NULL)
+		fclose(pFileAgentPathLog);
+	}
+
+	// SEList: scan eligible List implementation: the reason for not using STL-like template is to avoid overhead associated pointer allocation/deallocation
+	void SEList_clear()
+	{
+		m_ListFront = -1;
+		m_ListTail = -1;
+	}
+
+	void SEList_push_front(int node)
+	{
+		if (m_ListFront == -1)  // start from empty
+		{
+			m_SENodeList[node] = -1;
+			m_ListFront = node;
+			m_ListTail = node;
+		}
+		else
+		{
+			m_SENodeList[node] = m_ListFront;
+			m_ListFront = node;
+		}
+	}
+	void SEList_push_back(int node)
+	{
+		if (m_ListFront == -1)  // start from empty
+		{
+			m_ListFront = node;
+			m_ListTail = node;
+			m_SENodeList[node] = -1;
+		}
+		else
+		{
+			m_SENodeList[m_ListTail] = node;
+			m_SENodeList[node] = -1;
+			m_ListTail = node;
+		}
+	}
+
+	bool SEList_empty()
+	{
+		return(m_ListFront == -1);
+	}
+
+	int SEList_front()
+	{
+		return m_ListFront;
+	}
+
+	void SEList_pop_front()
+	{
+		int tempFront = m_ListFront;
+		m_ListFront = m_SENodeList[m_ListFront];
+		m_SENodeList[tempFront] = -1;
+	}
+
+	int optimal_label_correcting(int origin_vertex, int destination_stopid, int ending_time)
+		// time-dependent label correcting algorithm with double queue implementation
+	{
+		int internal_debug_flag = 0;
+
+		double earlest_time_to_last_stop = _MAX_LABEL_COST;
+		if (g_vertex_vector[origin_vertex].m_outgoing_vertex_vector.size() == 0)
+		{
+			return 0;
+		}
+
+		for (int i = 0; i < g_number_of_nodes; i++) //Initialization for all nodes
+		{
+			m_node_status_array[i] = 0;  // not scanned
+			m_node_label_cost[i] = _MAX_LABEL_COST;
+			m_node_predecessor[i] = -1;  // pointer to previous NODE INDEX from the current label at current node and time
+		}
+
+		//Initialization for origin node at the preferred departure time, at departure time, cost = 0, otherwise, the delay at origin node
+
+		m_node_label_cost[origin_vertex] = g_vertex_vector[origin_vertex].time_in_min;
+
+
+		SEList_clear();
+		SEList_push_back(origin_vertex);
+
+		while (!SEList_empty())
+		{
+			int from_vertex = SEList_front();//pop a node FromID for scanning
+
+			SEList_pop_front();  // remove current node FromID from the SE list
+					 //if (g_shortest_path_debugging_flag)
+			//	fprintf(g_pFileDebugLog, "SP: SE node: %d\n", from_vertex);
+
+			//scan all outbound nodes of the current node
+			for (int i = 0; i < g_vertex_vector[from_vertex].m_outgoing_vertex_vector.size(); i++)  // for each link (i,j) belong A(i)
+			{
+				int to_vertex = g_vertex_vector[from_vertex].m_outgoing_vertex_vector[i].to_vertex_no;
+
+				ASSERT(to_vertex <= g_number_of_nodes);
+				bool  b_node_updated = false;
+
+				int new_to_vertex_arrival_time = g_vertex_vector[from_vertex].time_in_min + g_vertex_vector[from_vertex].m_outgoing_vertex_vector[i].cost;
+
+				//					if (g_shortest_path_debugging_flag)
+				//						fprintf(g_pFileDebugLog, "SP: checking from node %d, to node %d at time %d, FFTT = %d\n",
+				//					from_vertex, to_vertex, new_to_vertex_arrival_time,  g_link_free_flow_travel_time[link_no]);
+
+
+
+				if (new_to_vertex_arrival_time < m_node_label_cost[to_vertex] && new_to_vertex_arrival_time < ending_time) // we only compare cost at the downstream node ToID at the new arrival time t
+				{
+
+					//if (g_shortest_path_debugging_flag)
+					//	fprintf(g_pFileDebugLog, "SP: updating node: %d from time %d to time %d, current cost: %.2f, from cost %.2f ->%.2f\n",
+					//	to_vertex, t, new_to_vertex_arrival_time,
+					//	g_node_label_cost[from_vertex][t],
+					//	g_node_label_cost[to_vertex][new_to_vertex_arrival_time], temporary_label_cost);
+
+					// update cost label and node/time predecessor
+
+					m_node_label_cost[to_vertex] = new_to_vertex_arrival_time;
+					m_node_predecessor[to_vertex] = from_vertex;  // pointer to previous physical NODE INDEX from the current label at current node and time
+
+					b_node_updated = true;
+
+					if (m_node_status_array[to_vertex] != 1)  // not scanned
+					{
+						if (g_shortest_path_debugging_flag)
+							fprintf(g_pFileDebugLog, "SP: add node %d into SE List\n",
+								to_vertex);
+
+
+						SEList_push_back(to_vertex);
+						m_node_status_array[to_vertex] = 1;
+					}
+					else  //have been scanned.
+					{
+						SEList_push_front(to_vertex);
+
+
+					}
+				}
+
+			}
+		}
+
+		float total_cost = _MAX_LABEL_COST;
+		int  best_vertext_no = -1;
+
+		if (destination_stopid == -1)   // no specific destination stop is defined.
+		{
+			int accessible_vertext_count = 0;
+			for (int i = 0; i < g_number_of_nodes; i++) //Initialization for all nodes
+			{
+				if (m_node_status_array[i] == 1)
+				{
+					accessible_vertext_count++;
+
+				}
+			}
+			return accessible_vertext_count;
+		}
+
+
+		for (int i = 0; i < g_number_of_nodes; i++) //Initialization for all nodes
+		{
+			if(m_node_status_array[i] ==1)
+			{ 
+				if (g_vertex_vector[i].stop_id == destination_stopid && m_node_label_cost[i] < total_cost)
+				{
+					total_cost = m_node_label_cost[i];
+					best_vertext_no = i;
+				}
+
+			}
+		}
+
+		return best_vertext_no;
+	}
+
+	void optimal_label_correcting_for_all_nodes_assigned_to_processor(int number_of_threads, int processor_no)
+	{
+
+		for (int i = 0; i < g_number_of_nodes; i++) //Initialization for all nodes
+		{  
+			int count = 0;
+			if((i%number_of_threads)== processor_no && g_vertex_vector[i].type ==1)
+			{
+				if(count%1000==0 && (processor_no==0 || processor_no == number_of_threads-1))
+				{
+				cout << "computing node " << i << " on processor " << processor_no << endl;
+				}
+
+				optimal_label_correcting(i, -1, g_vertex_vector[i].time_in_min + 60);
+
+			count++;
+			}
+		}
+	
+	
+	}
+
+
+	void find_path_for_agent(int number_of_threads, int id)
+	{
+		int max_trv_time = 60;
+		int row, col;
+		int des_stop_id;
+		int t;
+		int deboarding_stop_vertex;
+		int deboarding_stop_id;
+		string key;
+		int mincost_vertex_no;
+
+		for (int i = 0; i < g_agent_number; i++)
+		{
+			if (i % number_of_threads != id)
+				continue;
+			CAgentDemand* p_agent = &(g_agent_demands[i]);
+			//step 1 find the nearest stop from the origin and destination
+			int boarding_vertex_no = m_Tool.FindNearestVertex(p_agent->from_x, p_agent->from_y, p_agent->departure_time_in_min);
+			if (boarding_vertex_no < 0)
+			{
+				fprintf(g_pFileDebugLog, "agent %d with origin (%f,%f) position out of grid3D range,\n", i, p_agent->from_x, p_agent->from_y);
+				boarding_vertex_no = m_Tool.FindNearestVertex(p_agent->from_x, p_agent->from_y, p_agent->departure_time_in_min,true);
+				continue;
+			}
+			deboarding_stop_id = m_Tool.FindNearestStopid(p_agent->to_x, p_agent->to_y);
+			if (deboarding_stop_id< 0)
+			{
+				fprintf(g_pFileDebugLog, "agent %d with destination (%f,%f) position out of grid3D range,\n", i, p_agent->to_x, p_agent->to_y);
+				deboarding_stop_id = m_Tool.FindNearestStopid(p_agent->to_x, p_agent->to_y,true);
+				continue;
+			}
+
+			//step 2 buil SP tree
+			int mincost_vertex_no = optimal_label_correcting(boarding_vertex_no, deboarding_stop_id, g_vertex_vector[boarding_vertex_no].time_in_min + 60);
+			//step 3 find the destination vertex
+
+
+			if (mincost_vertex_no == -1)
+			{
+				fprintf(g_pFileDebugLog, "agent %d with can not find destination vertex,\n", i);
+				continue;
+			}
+			//write out path
+			if (pFileAgentPathLog == NULL)
+				continue;
+
+			int current_vertex_no;
+
+			current_vertex_no = mincost_vertex_no;
+
+			fprintf(pFileAgentPathLog, "%d,%d,%5.1f,", i+1, deboarding_stop_id, m_node_label_cost[mincost_vertex_no]- p_agent->departure_time_in_min,  m_node_label_cost[mincost_vertex_no]);
+			while (current_vertex_no>0)
+			{
+				current_vertex_no = m_node_predecessor[current_vertex_no];
+				if (current_vertex_no < 0)
+					break;
+				fprintf(pFileAgentPathLog, "%d;", g_vertex_vector[current_vertex_no].stop_id);
+			}
+			fprintf(pFileAgentPathLog, ",");
+			current_vertex_no = mincost_vertex_no;
+			while (current_vertex_no>0)
+			{
+				current_vertex_no = m_node_predecessor[current_vertex_no];
+				if (current_vertex_no < 0)
+					break;
+				fprintf(pFileAgentPathLog, "%f:%f;", g_vertex_vector[current_vertex_no].x, g_vertex_vector[current_vertex_no].y);
+			}
+			fprintf(pFileAgentPathLog, "\n");
+			if (id == 0 && g_google_output_count < 100)
+			{//write google path
+				fprintf(g_pFileGooglePath, "%d,,%d\n", i + 1, p_agent->departure_time_in_min);
+				fprintf(g_pFileGooglePath, "%f,%f,%d\n", p_agent->from_x, p_agent->from_y, p_agent->departure_time_in_min);
+				current_vertex_no = mincost_vertex_no;
+				while (current_vertex_no>0)
+				{
+					fprintf(g_pFileGooglePath, "%f,%f,%d\n", g_vertex_vector[current_vertex_no].x, g_vertex_vector[current_vertex_no].y,g_vertex_vector[current_vertex_no].time_in_min);
+					current_vertex_no = m_node_predecessor[current_vertex_no];
+				}
+				fprintf(g_pFileGooglePath, "%f,%f,\n", p_agent->to_x, p_agent->to_y);
+				fprintf(g_pFileGooglePath, ",,,\n");
+				g_google_output_count++;
+			}
+		}
+
+	}
+
+};
+void g_generate_shortest_path_matrix()
+{
+	
+	//fprintf(g_pFileDebugLog, "\nstop_id,time,number_of_outgoing_vertex,accessible count---------------------------\n");
+	//for (int i = 0; i < g_number_of_nodes; i++) //Initialization for all nodes
+	//{
+	//	if(g_vertex_vector[i].type == 1)
+	//	{ 
+	//	fprintf(g_pFileDebugLog, "%d,%d,%d,%d\n", g_vertex_vector[i].stop_id, g_vertex_vector[i].time_in_min, g_vertex_vector[i].m_outgoing_vertex_vector.size(), g_vertex_vector[i].accessible_vertex_count);
+	//	}
+	//}
+}
+
+int g_number_of_CPU_threads()
+{
+	int number_of_threads = omp_get_max_threads();
+
+	int max_number_of_threads = 39;
+
+	if (number_of_threads > max_number_of_threads)
+		number_of_threads = max_number_of_threads;
+
+	return number_of_threads;
+
+}
+
+
+
+NetworkForSP* pNetworkForSP = NULL;
+
+int _tmain(int argc, TCHAR* argv[], TCHAR* envp[])
+{
+	int nRetCode = 0;
+
+	HMODULE hModule = ::GetModuleHandle(NULL);
+
+	if (hModule != NULL)
+	{
+		// initialize MFC and print and error on failure
+		if (!AfxWinInit(hModule, NULL, ::GetCommandLine(), 0))
+		{
+			// TODO: change error code to suit your needs
+			_tprintf(_T("Fatal Error: MFC initialization failed\n"));
+			nRetCode = 1;
+		}
+		else
+		{
+			// TODO: code your application's behavior here.
+		}
+	}
+	else
+	{
+		// TODO: change error code to suit your needs
+		_tprintf(_T("Fatal Error: GetModuleHandle failed\n"));
+		nRetCode = 1;
+	}
+
+	g_pFileDebugLog = fopen("Debug.txt", "w");
+	if (g_pFileDebugLog == NULL)
+	{ 
+		cout << "File Debug.txt cannot be opened." << endl;
+		g_ProgramStop();
+	}
+	 g_pFileOutputLog = fopen("output_solution.csv", "w");
+	 if (g_pFileOutputLog == NULL)
+	 {
+		 cout << "File output_solution.csv cannot be opened." << endl;
+		 g_ProgramStop();
+	 }
+	 g_pFileAgentPathLog = fopen("agent_path.csv", "w");
+	 if (g_pFileAgentPathLog == NULL)
+	 {
+		 cout << "File agent_path.csv cannot be opened." << endl;
+		 g_ProgramStop();
+	 }
+	 g_pFileGooglePath = fopen("Google_path.csv", "w");
+	 if (g_pFileGooglePath == NULL)
+	 {
+		 cout << "File Google_path.csv cannot be opened." << endl;
+		 g_ProgramStop();
+	 }
+	 fprintf(g_pFileGooglePath, "lat\\agent_id,lon,time\n");
+	 g_google_output_count = 0;
+
+	g_ReadInputData();
+	g_make_grid3D();
+	g_make_grid2D();
+	// definte timestamps
+	clock_t start_t, end_t, total_t;
+	int i;
+
+	start_t = clock();
+	int number_of_threads = max(1, g_number_of_CPU_threads());
+	pNetworkForSP = new NetworkForSP[number_of_threads];
+
+
+	for (int i = 0; i < number_of_threads; i++)
+	{
+		pNetworkForSP[i].m_threadNo = i;
+		pNetworkForSP[i].AllocateMemory(g_number_of_nodes);
+
+	}
+
+	cout << "Shorest path caculating for agents in progress...";
+#pragma omp parallel for
+	for (int ProcessID = 0; ProcessID < number_of_threads; ProcessID++)
+	{
+		// create network for shortest path calculation at this processor
+		int	id = omp_get_thread_num();  // starting from 0
+		//pNetworkForSP[id].optimal_label_correcting_for_all_nodes_assigned_to_processor(number_of_threads,id);
+		pNetworkForSP[ProcessID].find_path_for_agent(number_of_threads, ProcessID);
+	}
+	
+
+	g_generate_shortest_path_matrix();
+
+	end_t = clock();
+
+	total_t = (end_t - start_t);
+
+	cout << "CPU Running Time = " << total_t << " milliseconds" << endl;
+
+	fprintf(g_pFileDebugLog, "CPU Running Time = %ld milliseconds\n", total_t);
+	fprintf(g_pFileOutputLog, "CPU Running Time =,%ld, milliseconds\n", total_t);
+	
+	fclose(g_pFileOutputLog);
+	fclose(g_pFileDebugLog);
+	fclose(g_pFileAgentPathLog);
+	fclose(g_pFileGooglePath);
+
+	cout << "End of Optimization " << endl;
+	cout << "free memory.." << endl;
+	cout << "done." << endl;
+	delete[] pNetworkForSP;
+	g_free_grid3Ds_memory();
+
+	return nRetCode;
+}

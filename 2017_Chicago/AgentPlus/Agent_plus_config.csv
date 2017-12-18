@@ -1,0 +1,7 @@
+key,value
+number_of_thread,6
+max_transfer_count,6
+max_transfer_distance,1
+max_Transfer_time,30
+max_travel_time,120
+max_iteration,100

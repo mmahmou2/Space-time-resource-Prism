@@ -1,2 +1,1 @@
 Forward dynamic programming
-change debugging log

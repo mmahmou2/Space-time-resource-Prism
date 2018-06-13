@@ -1,0 +1,472 @@
+#pragma once
+
+#include "DataStruct.h"
+#include "GlobalDef.h"
+
+using namespace std;
+
+class gridTool
+{
+public:
+	static int m_grid3D_rows;
+	static int m_grid3D_cols;
+	static std::map<string, grid3D*> m_grid3D_map;
+	static std::map<string, grid2D*> m_grid2D_map;
+	
+	static double m_grid3D_len;//the spatial length of a grid,unit:degree of lat or lon
+	static double m_grid3D_time_len; // the temporal length of a 3D grid,unit:minute
+
+public:
+		//variables used to mark the border of the network and demands
+	static double m_area_min_x;
+	static double m_area_min_y;
+	static double m_area_max_x;
+	static double m_area_max_y;
+		//	vector<int> near_vertex;
+public:
+	static void InitTool()
+	{
+		m_grid3D_rows = 0;
+		m_grid3D_cols = 0;
+		m_grid3D_map.clear();
+		m_grid2D_map.clear();
+		m_grid3D_len = 0.01;
+		m_grid3D_time_len = 15;
+		m_area_min_x = 999999999;
+		m_area_min_y = 999999999;
+		m_area_max_x = -999999999;
+		m_area_max_y = -999999999;
+	}
+	static void Dispose()
+	{
+		free_grid2Ds_memory();
+		free_grid3Ds_memory();
+	}
+	static void UpdateBorder(double x, double y)
+	{
+		if (x > m_area_max_x)
+			m_area_max_x = x;
+		if (x < m_area_min_x)
+			m_area_min_x = x;
+		if (y > m_area_max_y)
+			m_area_max_y = y;
+		if (y < m_area_min_y)
+			m_area_min_y = y;
+	}
+	static int make_grid3D()
+	{
+		//step 1. making grid3Ds
+		int rows = ceil((m_area_max_y - m_area_min_y) / m_grid3D_len);
+		int cols = ceil((m_area_max_x - m_area_min_x) / m_grid3D_len);
+		m_grid3D_rows = rows;
+		m_grid3D_cols = cols;
+		char buff[30];
+		grid3D* pgrid3D;
+		for (int i = 0; i < g_number_of_nodes; i++)
+		{
+			CVertex vertex = g_vertex_vector[i];
+			int row = floor((vertex.y - m_area_min_y) / m_grid3D_len);
+			int col = floor((vertex.x - m_area_min_x) / m_grid3D_len);
+			int t = (int)floor(vertex.time_in_min / m_grid3D_time_len);
+			string key = g_convert_3Dkeys_to_string(row, col, t);
+			if (m_grid3D_map.find(key) == m_grid3D_map.end())  // has not been defined. 
+			{
+				pgrid3D = new grid3D();
+				pgrid3D->add_vertex(i);
+				m_grid3D_map[key] = pgrid3D;
+			}
+			else
+			{
+				m_grid3D_map[key]->add_vertex(i);
+			}
+
+		}
+		return 1;
+	}
+
+
+	static int make_grid2D()
+	{//we use vertexes data to generate 2D grid, because we never thought that stops' data will be loaded.
+		//step 1. making grid2Ds
+		char buff[30];
+		grid2D* pgrid2D;
+		for (int i = 0; i < g_number_of_nodes; i++)
+		{
+			CVertex vertex = g_vertex_vector[i];
+			int row = floor((vertex.y - m_area_min_y) / m_grid3D_len);
+			int col = floor((vertex.x - m_area_min_x) / m_grid3D_len);
+			string key = g_convert_2Dkeys_to_string(row, col);
+			if (m_grid2D_map.find(key) == m_grid2D_map.end())  // has not been defined. 
+			{
+				pgrid2D = new grid2D();
+				pgrid2D->add_stopid(g_vertex_vector[i].stop_id, g_vertex_vector[i].x, g_vertex_vector[i].y);
+				m_grid2D_map[key] = pgrid2D;
+			}
+			else
+			{
+				m_grid2D_map[key]->add_stopid(g_vertex_vector[i].stop_id, g_vertex_vector[i].x, g_vertex_vector[i].y);
+
+
+			}
+		}
+		return 1;
+	}
+	static int FindNearestVertex(double x, double y, float t, bool bLog = false)
+	{
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a nearest vertext of %9.6f,%9.6f,%d\n", x, y, t);
+		if (x < m_area_min_x)
+			x = m_area_min_x;
+		if (x > m_area_max_x)
+			x = m_area_max_x;
+		if (y < m_area_min_y)
+			y = m_area_min_y;
+		if (y > m_area_max_y)
+			y = m_area_max_y;
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a nearest vertext of %9.6f,%9.6f,%d\n", x, y, t);
+
+		int row = floor((y - m_area_min_y) / m_grid3D_len);
+		int col = floor((x - m_area_min_x) / m_grid3D_len);
+		if (row < 0 || row >= m_grid3D_rows || col < 0 || col >= m_grid3D_cols)
+		{
+			fprintf(g_pFileDebugLog, "%s,%f,%f,%s\n", "Point at", x, y, "out of grid3D range");
+			g_ProgramStop();
+		}
+
+		int row_idx, col_idx, time_idx, bt;
+		double dis;
+		int vertex_no;
+		double mindis = 999999999;
+		int mindis_ver = -1;
+		int timestep = g_max_Transfer_time / m_grid3D_time_len + 1;
+		bool bUpdate = false;
+
+
+		bt = floor(t / m_grid3D_time_len);
+		for (int i = -1; i <= 1; i++)
+		{
+			row_idx = row + i;
+			if (row_idx < 0 || row_idx >= m_grid3D_rows)
+				continue;
+			for (int j = -1; j <= 1; j++)
+			{
+				col_idx = col + j;
+				if (col_idx < 0 || col_idx >= m_grid3D_cols)
+					continue;
+				for (int k = 0; k < timestep; k++)
+				{
+					time_idx = bt + k;
+					if (bLog)
+						fprintf(g_pFileDebugLog, "Checking grid3d at row=%d col=%d t=%d\n", row_idx, col_idx, time_idx);
+					string key = g_convert_3Dkeys_to_string(row_idx, col_idx, time_idx);
+					if (m_grid3D_map.find(key) == m_grid3D_map.end())
+					{
+						if (bLog)
+						{
+							fprintf(g_pFileDebugLog, "Grid3D %s does not exist\n", key.c_str());
+						}
+						continue;
+					}
+					grid3D* pG = m_grid3D_map[key];
+					for (int m = 0; m < pG->vertexes_in_grid3D.size(); m++)
+					{
+						vertex_no = pG->vertexes_in_grid3D[m];
+						dis = GetDistance(x, y, g_vertex_vector[vertex_no].x, g_vertex_vector[vertex_no].y);
+						if (bLog)
+							fprintf(g_pFileDebugLog, "index=%d,vNO=%d, point=(%9.6f, %9.6f) dis=%5.2f\n", m, vertex_no,
+							g_vertex_vector[vertex_no].x, g_vertex_vector[vertex_no].y, dis);
+						if (dis < mindis)
+						{
+							mindis = dis;
+							mindis_ver = vertex_no;
+							bUpdate = true;
+						}
+					}
+
+				}
+			}
+		}
+		if (mindis < g_max_air_distance)
+			return mindis_ver;
+		else
+		{
+			if (bUpdate)
+				return -mindis_ver;
+			else
+			{
+				return g_small_negative_number;
+			}
+		}
+	}
+	static int FindNearVertexes(double x, double y, float t, vector<int>* pRslt, bool bLog = false)
+	{
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a near vertextes list of %9.6f,%9.6f,%d\n", x, y, t);
+		if (x < m_area_min_x)
+			x = m_area_min_x;
+		if (x > m_area_max_x)
+			x = m_area_max_x;
+		if (y < m_area_min_y)
+			y = m_area_min_y;
+		if (y > m_area_max_y)
+			y = m_area_max_y;
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a near vertextes list of %9.6f,%9.6f,%d\n", x, y, t);
+
+		int row = floor((y - m_area_min_y) / m_grid3D_len);
+		int col = floor((x - m_area_min_x) / m_grid3D_len);
+		if (row < 0 || row >= m_grid3D_rows || col < 0 || col >= m_grid3D_cols)
+		{
+			fprintf(g_pFileDebugLog, "%s,%f,%f,%s\n", "Point at", x, y, "out of grid3D range");
+			g_ProgramStop();
+		}
+
+		int row_idx, col_idx, time_idx, bt;
+		double dis;
+		int vertex_no;
+		int timestep = g_max_Transfer_time / m_grid3D_time_len + 1;
+		int number = 0;
+
+		bt = floor(t / m_grid3D_time_len);
+		for (int i = -1; i <= 1; i++)
+		{
+			row_idx = row + i;
+			if (row_idx < 0 || row_idx >= m_grid3D_rows)
+				continue;
+			for (int j = -1; j <= 1; j++)
+			{
+				col_idx = col + j;
+				if (col_idx < 0 || col_idx >= m_grid3D_cols)
+					continue;
+				for (int k = 0; k < timestep; k++)
+				{
+					time_idx = bt + k;
+					if (bLog)
+						fprintf(g_pFileDebugLog, "Checking grid3d at row=%d col=%d t=%d\n", row_idx, col_idx, time_idx);
+					string key = g_convert_3Dkeys_to_string(row_idx, col_idx, time_idx);
+					if (m_grid3D_map.find(key) == m_grid3D_map.end())
+					{
+						if (bLog)
+						{
+							fprintf(g_pFileDebugLog, "Grid3D %s does not exist\n", key.c_str());
+						}
+						continue;
+					}
+					grid3D* pG = m_grid3D_map[key];
+					for (int m = 0; m < pG->vertexes_in_grid3D.size(); m++)
+					{
+						vertex_no = pG->vertexes_in_grid3D[m];
+						CVertex* pV = &g_vertex_vector[vertex_no];
+						if (pV->time_in_min < t)
+							continue;
+						dis = GetDistance(x, y, pV->x, pV->y);
+						if (bLog)
+							fprintf(g_pFileDebugLog, "index=%d,vNO=%d, point=(%9.6f, %9.6f) dis=%5.2f\n", m, vertex_no,
+								pV->x, pV->y, dis);
+						if (dis < g_max_air_distance)
+						{
+							pRslt->push_back(vertex_no);
+							number++;
+						}
+					}
+
+				}
+			}
+		}
+		return number;
+	}
+	static int FindNearestStopid(double x, double y, bool bLog = false)
+	{
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a nearsest stop of %9.6f, %9.6f\n", x, y);
+		if (x < m_area_min_x)
+			x = m_area_min_x;
+		if (x > m_area_max_x)
+			x = m_area_max_x;
+		if (y < m_area_min_y)
+			y = m_area_min_y;
+		if (y > m_area_max_y)
+			y = m_area_max_y;
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a nearsest stop of %9.6f, %9.6f\n", x, y);
+
+		int row = floor((y - m_area_min_y) / m_grid3D_len);
+		int col = floor((x - m_area_min_x) / m_grid3D_len);
+		if (row < 0 || row >= m_grid3D_rows || col < 0 || col >= m_grid3D_cols)
+		{
+			fprintf(g_pFileDebugLog, "%s,%f,%f,%s\n", "Point at", x, y, "out of grid2D range");
+			g_ProgramStop();
+		}
+
+		int row_idx, col_idx;
+		double dis;
+		int stopid;
+		double mindis = 999999999;
+		int mindis_stopid = g_small_negative_number;
+		bool bUpdate = false;
+
+		for (int i = -1; i <= 1; i++)
+		{
+			row_idx = row + i;
+			if (row_idx < 0 || row_idx >= m_grid3D_rows)
+				continue;
+			for (int j = -1; j <= 1; j++)
+			{
+				col_idx = col + j;
+				if (col_idx < 0 || col_idx >= m_grid3D_cols)
+					continue;
+
+				string key = g_convert_2Dkeys_to_string(row_idx, col_idx);
+				if (bLog)
+					fprintf(g_pFileDebugLog, "Checking grid at row=%d col=%d key=%s", row_idx, col_idx, key.c_str());
+				if (m_grid2D_map.find(key) == m_grid2D_map.end())
+				{
+					if (bLog)
+						fprintf(g_pFileDebugLog, ". Does not exist\n");
+					continue;
+				}
+				grid2D* pG = m_grid2D_map[key];
+				for (int m = 0; m < pG->stops_in_grid2D.size(); m++)
+				{
+					stopid = pG->stops_in_grid2D[m];
+					dis = GetDistance(x, y, pG->stop_x[m], pG->stop_y[m]);
+					if (bLog)
+						fprintf(g_pFileDebugLog, ". Checking stops in Grid2d idx=%d, id=%d point=( %9.6f,%9.6f ) dis=%5.2f\n", m,
+						stopid, pG->stop_x, pG->stop_y, dis);
+					if (dis < mindis)
+					{
+						mindis = dis;
+						mindis_stopid = stopid;
+						bUpdate = true;
+					}
+				}
+
+			}
+		}
+		if (mindis < g_max_air_distance)
+			return mindis_stopid;
+		else
+		{
+			if (bUpdate)
+				return -mindis_stopid;
+			else
+				return mindis_stopid;
+
+		}
+	}
+	static int FindNearStopid(double x, double y, vector<int>* pRslt, map<int,int>* pCosts, bool bLog = false)
+	{
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a near stops list of %9.6f, %9.6f\n", x, y);
+		if (x < m_area_min_x)
+			x = m_area_min_x;
+		if (x > m_area_max_x)
+			x = m_area_max_x;
+		if (y < m_area_min_y)
+			y = m_area_min_y;
+		if (y > m_area_max_y)
+			y = m_area_max_y;
+		if (bLog)
+			fprintf(g_pFileDebugLog, "We are looking for a near stops list of %9.6f, %9.6f\n", x, y);
+
+		int row = floor((y - m_area_min_y) / m_grid3D_len);
+		int col = floor((x - m_area_min_x) / m_grid3D_len);
+		if (row < 0 || row >= m_grid3D_rows || col < 0 || col >= m_grid3D_cols)
+		{
+			fprintf(g_pFileDebugLog, "%s,%f,%f,%s\n", "Point at", x, y, "out of grid2D range");
+			g_ProgramStop();
+		}
+
+		int row_idx, col_idx;
+		double dis;
+		int stopid;
+		int number = 0;
+
+		for (int i = -1; i <= 1; i++)
+		{
+			row_idx = row + i;
+			if (row_idx < 0 || row_idx >= m_grid3D_rows)
+				continue;
+			for (int j = -1; j <= 1; j++)
+			{
+				col_idx = col + j;
+				if (col_idx < 0 || col_idx >= m_grid3D_cols)
+					continue;
+
+				string key = g_convert_2Dkeys_to_string(row_idx, col_idx);
+				if (bLog)
+					fprintf(g_pFileDebugLog, "Checking grid at row=%d col=%d key=%s", row_idx, col_idx, key.c_str());
+				if (m_grid2D_map.find(key) == m_grid2D_map.end())
+				{
+					if (bLog)
+						fprintf(g_pFileDebugLog, ". Does not exist\n");
+					continue;
+				}
+				grid2D* pG = m_grid2D_map[key];
+				for (int m = 0; m < pG->stops_in_grid2D.size(); m++)
+				{
+					stopid = pG->stops_in_grid2D[m];
+					dis = GetDistance(x, y, pG->stop_x[m], pG->stop_y[m]);
+					if (bLog)
+						fprintf(g_pFileDebugLog, ". Checking stops in Grid2d idx=%d, id=%d point=( %9.6f,%9.6f ) dis=%5.2f\n", m,
+							stopid, pG->stop_x, pG->stop_y, dis);
+					if (dis < g_max_air_distance)
+					{
+						float miniutes = (float)(dis / g_avg_walking_speed);
+						if (pCosts->find(stopid) == pCosts->end())
+						{
+							(*pCosts)[stopid] = miniutes;
+						}
+						pRslt->push_back(stopid);
+						number++;
+					}
+				}
+
+			}
+		}
+		return number;
+	}
+	static double GetDistance(double x1, double y1, double x2, double y2)
+	{
+		double Equatorial_Radius = 3963.19059; // unit: mile
+		double toradians = 3.1415926 / 180.0;
+		//double todeg = 180.0 / Math.PI;
+
+		double p2lat = x2 * toradians;
+		double p2lng = y2 * toradians;
+
+		double p1lat = x1 * toradians;
+		double p1lng = y1 * toradians;
+		double g = sin(p1lat) * sin(p2lat) + cos(p1lat) * cos(p2lat) * cos(p2lng - p1lng);
+		if (g < -1)
+			g = -1;
+		else if (g > 1)
+			g = 1;
+		double distance = acos(g) * Equatorial_Radius;
+		// unit: mile
+		return distance;
+
+	}
+	
+private:
+	static void free_grid2Ds_memory()
+	{
+		for (std::map<string, grid2D*>::iterator it = m_grid2D_map.begin(); it != m_grid2D_map.end(); ++it)
+		{
+			delete it->second;
+			it->second = NULL;
+		}
+		m_grid2D_map.clear();
+	}
+	static void free_grid3Ds_memory()
+	{
+		for (std::map<string, grid3D*>::iterator it = m_grid3D_map.begin(); it != m_grid3D_map.end(); ++it)
+		{
+			delete it->second;
+			it->second = NULL;
+		}
+		m_grid3D_map.clear();
+	}
+
+};
